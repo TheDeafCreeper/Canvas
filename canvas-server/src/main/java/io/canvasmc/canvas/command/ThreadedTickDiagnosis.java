@@ -29,6 +29,7 @@ import org.jetbrains.annotations.NotNull;
 import org.spigotmc.SpigotConfig;
 
 import static java.lang.String.valueOf;
+import static net.kyori.adventure.text.Component.newline;
 import static net.kyori.adventure.text.Component.text;
 import static net.kyori.adventure.text.format.NamedTextColor.GREEN;
 import static net.kyori.adventure.text.format.TextColor.color;
@@ -112,23 +113,36 @@ public class ThreadedTickDiagnosis {
     private static void doLevel(@NotNull List<TextComponent> l, @NotNull ServerLevel level, @NotNull TextComponent base) {
         int playerCount = level.players().size();
         int entityCount = level.moonrise$getEntityLookup().getEntityCount();
+        long[] tickDurationsLong = level.tickTimes10s.getTimes();
+        if (tickDurationsLong.length == 0) {
+            throw new IllegalArgumentException("Array is empty");
+        }
+
+        Arrays.sort(tickDurationsLong);
+        int index = (int) Math.ceil(0.95 * tickDurationsLong.length) - 1;
+        index = Math.max(0, Math.min(index, tickDurationsLong.length - 1));
+
+        double _95$ile = tickDurationsLong[index] / 1.0E6D;
 
         l.add(base.append(text(" - ThreadedLevel [")
             .append(text(level.dimension().location().toString()).color(color(0x96D6F0)))
             .append(text("]").color(color(0x4EA2ED)))));
-
-        l.add(base.append(Component.text("   ")).append(MSPTCommand.getColor(level.getNanoSecondsFromLastTick() / 1_000_000)
-                                                                   .append(text(" MSPT at "))
-                                                                   .append(createColoredComponent(simplifyNumber((float) level.recentTps[0]).toString(), (float) level.recentTps[0], 20F))
-                                                                   .append(text(" TPS"))));
-
-        float threadUtil = (float) (((level.getNanoSecondsFromLastTick() / 1_000_000.0) / 50) * 100);
-        if (threadUtil > 100) threadUtil = 100;
-
+        l.add(base.append(text("   ")).append(createTpsComponent(level)));
         l.add(base
             .append(text("   Players: ").append(text(valueOf(playerCount)).color(color(VALUE))))
             .append(text(" Entities: ").append(text(valueOf(entityCount)).color(color(VALUE))))
-            .append(text(" Thread Utilization: ").append(createColoredUtilComponent(simplifyNumber(threadUtil) + "%", threadUtil))));
+            .append(text(" MSPT 95%ile: ").append(MSPTCommand.getColor(_95$ile)).append(text("ms")))
+        );
+    }
+
+    private static @NotNull Component createTpsComponent(@NotNull ServerLevel level) {
+        double mspt = level.getNanoSecondsFromLastTick() / 1_000_000;
+        float tps = (float) level.recentTps[0];
+
+        return text(" MSPT: ")
+            .append(MSPTCommand.getColor(mspt))
+            .append(text(" | TPS: "))
+            .append(createColoredComponent(simplifyNumber(tps).toString(), tps, 20F));
     }
 
     private static void chunkInfo(final List<TextComponent> list) {
@@ -140,6 +154,7 @@ public class ThreadedTickDiagnosis {
         int accumulatedTicking = 0;
         int accumulatedEntityTicking = 0;
         int accumulatedChunkTicking = 0;
+        int accumulatedTickingRegions = 0;
 
         for (final World bukkitWorld : worlds) {
             final ServerLevel world = ((CraftWorld) bukkitWorld).getHandle();
@@ -186,15 +201,17 @@ public class ThreadedTickDiagnosis {
             accumulatedTicking += blockTicking;
             accumulatedEntityTicking += entityTicking;
             accumulatedChunkTicking += world.chunkSource.lastTickingChunksCount;
+            accumulatedTickingRegions += world.chunkSource.tickingRegionsCount;
 
             list.add(text("  ").toBuilder().append(text("Chunks in ", color(0x4EA2ED)), text(bukkitWorld.getName(), GREEN), text(":")).build());
             list.add(text("  ").toBuilder().color(NamedTextColor.AQUA).append(
                 text("Total: ", color(0x4EA2ED)), text(total),
                 text(" Inactive: ", color(0x4EA2ED)), text(inactive),
-                text(" Full: ", color(0x4EA2ED)), text(full),
-                text(" Block Ticking: ", color(0x4EA2ED)), text(blockTicking),
                 text(" Entity Ticking: ", color(0x4EA2ED)), text(entityTicking),
-                text(" Chunk Ticking: ", color(0x4EA2ED)), text(world.chunkSource.lastTickingChunksCount)
+                text(" Block Ticking: ", color(0x4EA2ED)), text(blockTicking),
+                text(" Full: ", color(0x4EA2ED)), text(full),
+                text(" Chunk Ticking: ", color(0x4EA2ED)), text(world.chunkSource.lastTickingChunksCount),
+                text(" Tick Regions: ", color(0x4EA2ED)), text(world.chunkSource.tickingRegionsCount)
             ).build());
         }
         if (worlds.size() > 1) {
@@ -203,10 +220,11 @@ public class ThreadedTickDiagnosis {
             list.add(text("  ").toBuilder().color(NamedTextColor.AQUA).append(
                 text("Total: ", color(0x4EA2ED)), text(accumulatedTotal),
                 text(" Inactive: ", color(0x4EA2ED)), text(accumulatedInactive),
-                text(" Full: ", color(0x4EA2ED)), text(accumulatedBorder),
-                text(" Block Ticking: ", color(0x4EA2ED)), text(accumulatedTicking),
                 text(" Entity Ticking: ", color(0x4EA2ED)), text(accumulatedEntityTicking),
-                text(" Chunk Ticking: ", color(0x4EA2ED)), text(accumulatedChunkTicking)
+                text(" Block Ticking: ", color(0x4EA2ED)), text(accumulatedTicking),
+                text(" Full: ", color(0x4EA2ED)), text(accumulatedBorder),
+                text(" Chunk Ticking: ", color(0x4EA2ED)), text(accumulatedChunkTicking),
+                text(" Tick Regions: ", color(0x4EA2ED)), text(accumulatedTickingRegions)
             ).build());
         }
     }
