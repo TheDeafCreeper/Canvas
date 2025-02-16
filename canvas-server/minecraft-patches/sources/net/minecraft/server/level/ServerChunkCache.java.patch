@@ -1,9 +1,9 @@
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
-@@ -1,9 +_,14 @@
+@@ -1,22 +_,32 @@
  package net.minecraft.server.level;
  
-+import ca.spottedleaf.moonrise.common.misc.NearbyPlayers;
++import ca.spottedleaf.moonrise.common.util.TickThread;
 +import ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel;
  import com.google.common.annotations.VisibleForTesting;
 +import com.google.common.collect.Sets;
@@ -12,11 +12,20 @@
 -import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 +import io.canvasmc.canvas.Config;
 +import io.canvasmc.canvas.server.level.distance.WorldSpecificViewDistancePersistentState;
++import io.canvasmc.canvas.util.NamedAgnosticThreadFactory;
 +import io.netty.util.internal.ConcurrentSet;
  import java.io.IOException;
  import java.nio.file.Path;
  import java.util.ArrayList;
-@@ -17,6 +_,8 @@
+ import java.util.Arrays;
++import java.util.HashSet;
+ import java.util.List;
+ import java.util.Set;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.CompletionStage;
+ import java.util.concurrent.Executor;
++import java.util.concurrent.Executors;
+ import java.util.function.BooleanSupplier;
  import java.util.function.Consumer;
  import java.util.function.Supplier;
  import javax.annotation.Nullable;
@@ -25,7 +34,7 @@
  import net.minecraft.FileUtil;
  import net.minecraft.Util;
  import net.minecraft.core.BlockPos;
-@@ -54,9 +_,9 @@
+@@ -54,9 +_,10 @@
  
  public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moonrise.patches.chunk_system.world.ChunkSystemServerChunkCache { // Paper - rewrite chunk system
      private static final Logger LOGGER = LogUtils.getLogger();
@@ -34,6 +43,7 @@
      private final ServerLevel level;
 -    public final Thread mainThread;
 +    public Thread mainThread; // Canvas - mutable
++    static final Executor regionExecutor = Executors.newFixedThreadPool(16, new NamedAgnosticThreadFactory<>("region_ticking", TickThread::new, Thread.NORM_PRIORITY)); // Canvas - Threaded Regions
      final ThreadedLevelLightEngine lightEngine;
      public final ServerChunkCache.MainThreadExecutor mainThreadProcessor;
      public final ChunkMap chunkMap;
@@ -89,7 +99,7 @@
          // Paper end - rewrite chunk system
      }
  
-@@ -483,20 +_,25 @@
+@@ -483,24 +_,62 @@
      public void tick(BooleanSupplier hasTimeLeft, boolean tickChunks) {
          ProfilerFiller profilerFiller = Profiler.get();
          profilerFiller.push("purge");
@@ -119,7 +129,76 @@
          profilerFiller.pop();
          this.clearCache();
      }
-@@ -526,37 +_,133 @@
+ 
++    // Canvas Start - Regionized chunk ticking
++    private List<List<LevelChunk>> splitChunksIntoRegions(List<LevelChunk> chunks) {
++        Set<LevelChunk> chunkSet = new HashSet<>(chunks);
++        Set<LevelChunk> visited = new HashSet<>();
++        List<List<LevelChunk>> groups = new ArrayList<>();
++
++        for (LevelChunk chunk : chunks) {
++            if (!visited.contains(chunk)) {
++                List<LevelChunk> group = new ArrayList<>();
++                dfs(chunk, chunkSet, visited, group);
++                groups.add(group);
++            }
++        }
++
++        return groups;
++    }
++
++    private void dfs(LevelChunk current, Set<LevelChunk> chunkSet, Set<LevelChunk> visited, List<LevelChunk> group) {
++        visited.add(current);
++        group.add(current);
++
++        int[][] directions = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
++
++        for (int[] direction : directions) {
++            LevelChunk neighbor = getChunk(current.locX + direction[0], current.locZ + direction[1], false);
++            if (neighbor == null) continue;
++            if (chunkSet.contains(neighbor) && !visited.contains(neighbor)) {
++                dfs(neighbor, chunkSet, visited, group);
++            }
++        }
++    }
++    // Canvas End
++
+     private void tickChunks() {
+         long gameTime = this.level.getGameTime();
+         long l = gameTime - this.lastInhabitedUpdate;
+@@ -519,44 +_,164 @@
+                     this.shuffleRandom.setSeed(this.level.random.nextLong());
+                     if (!this.level.paperConfig().entities.spawning.perPlayerMobSpawns) Util.shuffle(list, this.shuffleRandom); // Paper - Optional per player mob spawns; do not need this when per-player is enabled
+                     // Paper end - chunk tick iteration optimisation
+-                    this.tickChunks(profilerFiller, l, list);
++
++                    // Canvas Start - Threaded Regions
++                    List<List<LevelChunk>> regions = splitChunksIntoRegions(list);
++                    //if (level.name().equals("minecraft:overworld")) MinecraftServer.LOGGER.info("There are {} regions in {}", regions.size(), level.name());
++
++                    List<CompletableFuture<Void>> futures = new ArrayList<>();
++
++                    for (List<LevelChunk> region : regions) {
++                        CompletableFuture<Void> future = new CompletableFuture<>();
++                        futures.add(future);
++
++                        regionExecutor.execute(() -> {
++                            try {
++                                tickChunks(profilerFiller, l, region);
++                            } finally {
++                                future.complete(null);
++                            }
++                        });
++                    }
++
++                    for (CompletableFuture<Void> future : futures) {
++                        level.managedBlock(future::isDone);
++                    }
++                    // Canvas End
++
+                     profilerFiller.pop();
+                 } finally {
+                     list.clear();
                  }
              }
  
